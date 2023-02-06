@@ -22,6 +22,7 @@ import (
 	"github.com/rancher/steve/pkg/server/router"
 	"github.com/rancher/steve/pkg/summarycache"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/dynamic"
 )
 
 var ErrConfigRequired = errors.New("rest config is required")
@@ -131,7 +132,11 @@ func setup(ctx context.Context, server *Server) error {
 
 	asl := server.AccessSetLookup
 	if asl == nil {
-		asl = accesscontrol.NewAccessStore(ctx, true, server.controllers.RBAC)
+		dynamicClient, err := dynamic.NewForConfig(server.RESTConfig)
+		if err != nil {
+			return err
+		}
+		asl = accesscontrol.NewAccessStore(ctx, true, server.controllers.RBAC, dynamicClient)
 	}
 
 	ccache := clustercache.NewClusterCache(ctx, cf.AdminDynamicClient())

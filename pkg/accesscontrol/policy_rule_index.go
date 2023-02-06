@@ -1,13 +1,18 @@
 package accesscontrol
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"hash"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sort"
+	"strings"
 
 	v1 "github.com/rancher/wrangler/pkg/generated/controllers/rbac/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 )
 
 const (
@@ -21,12 +26,13 @@ type policyRuleIndex struct {
 	crbCache            v1.ClusterRoleBindingCache
 	rbCache             v1.RoleBindingCache
 	revisions           *roleRevisionIndex
+	dynamic             dynamic.Interface
 	kind                string
 	roleIndexKey        string
 	clusterRoleIndexKey string
 }
 
-func newPolicyRuleIndex(user bool, revisions *roleRevisionIndex, rbac v1.Interface) *policyRuleIndex {
+func newPolicyRuleIndex(user bool, revisions *roleRevisionIndex, rbac v1.Interface, dynamicClient dynamic.Interface) *policyRuleIndex {
 	key := "Group"
 	if user {
 		key = "User"
@@ -37,6 +43,7 @@ func newPolicyRuleIndex(user bool, revisions *roleRevisionIndex, rbac v1.Interfa
 		rCache:              rbac.Role().Cache(),
 		crbCache:            rbac.ClusterRoleBinding().Cache(),
 		rbCache:             rbac.RoleBinding().Cache(),
+		dynamic:             dynamicClient,
 		clusterRoleIndexKey: "crb" + key,
 		roleIndexKey:        "rb" + key,
 		revisions:           revisions,
@@ -94,6 +101,20 @@ func (p *policyRuleIndex) addRolesToHash(digest hash.Hash, subjectName string) {
 			digest.Write(null)
 		}
 	}
+
+	for _, role := range p.getSubjectRegistrarRoles(subjectName) {
+		parts := strings.Split(role, ":")
+		ns, roleRefName := parts[1], parts[2]
+		roleRef := rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "Role",
+			Name:     roleRefName,
+		}
+		digest.Write([]byte(roleRef.Name))
+		digest.Write([]byte(ns))
+		digest.Write([]byte(p.revisions.roleRevision(ns, roleRef.Name)))
+		digest.Write(null)
+	}
 }
 
 func (p *policyRuleIndex) get(subjectName string) *AccessSet {
@@ -107,6 +128,16 @@ func (p *policyRuleIndex) get(subjectName string) *AccessSet {
 		p.addAccess(result, All, binding.RoleRef)
 	}
 
+	for _, role := range p.getSubjectRegistrarRoles(subjectName) {
+		parts := strings.Split(role, ":")
+		ns, roleRefName := parts[1], parts[2]
+		roleRef := rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "Role",
+			Name:     roleRefName,
+		}
+		p.addAccess(result, ns, roleRef)
+	}
 	return result
 }
 
@@ -172,6 +203,37 @@ func (p *policyRuleIndex) getRoleBindings(subjectName string) []*rbacv1.RoleBind
 	}
 	sort.Slice(result, func(i, j int) bool {
 		return string(result[i].UID) < string(result[j].UID)
+	})
+	return result
+}
+
+func (p *policyRuleIndex) getSubjectRegistrarRoles(subjectname string) []string {
+	srClient := p.dynamic.Resource(schema.GroupVersionResource{Group: "rbac.cattle.io", Version: "v1", Resource: "subjectregistrars"}).Namespace("default")
+	l, err := srClient.Get(context.Background(), subjectname, metav1.GetOptions{})
+	if err != nil {
+		return []string{}
+	}
+
+	var result []string
+	type S struct {
+		Role map[string]int `json:"appliedRoles,omitempty"`
+	}
+	type extractRole struct {
+		Status S `json:"status,omitempty"`
+	}
+	var role extractRole
+	b, err := l.MarshalJSON()
+	if err != nil {
+		return nil
+	}
+	if err := json.Unmarshal(b, &role); err != nil {
+		return nil
+	}
+	for key, _ := range role.Status.Role {
+		result = append(result, key)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i] < result[j]
 	})
 	return result
 }

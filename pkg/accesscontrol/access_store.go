@@ -10,6 +10,7 @@ import (
 	v1 "github.com/rancher/wrangler/pkg/generated/controllers/rbac/v1"
 	"k8s.io/apimachinery/pkg/util/cache"
 	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/client-go/dynamic"
 )
 
 type AccessSetLookup interface {
@@ -28,11 +29,11 @@ type roleKey struct {
 	name      string
 }
 
-func NewAccessStore(ctx context.Context, cacheResults bool, rbac v1.Interface) *AccessStore {
+func NewAccessStore(ctx context.Context, cacheResults bool, rbac v1.Interface, dy dynamic.Interface) *AccessStore {
 	revisions := newRoleRevision(ctx, rbac)
 	as := &AccessStore{
-		users:  newPolicyRuleIndex(true, revisions, rbac),
-		groups: newPolicyRuleIndex(false, revisions, rbac),
+		users:  newPolicyRuleIndex(true, revisions, rbac, dy),
+		groups: newPolicyRuleIndex(false, revisions, rbac, dy),
 	}
 	if cacheResults {
 		as.cache = cache.NewLRUExpireCache(50)

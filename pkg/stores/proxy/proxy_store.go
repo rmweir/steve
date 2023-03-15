@@ -275,7 +275,7 @@ func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dy
 	}
 
 	for i := range resultList.Items {
-		result.Objects = append(result.Objects, toAPI(schema, &resultList.Items[i]))
+		result.Objects = append(result.Objects, toAPI(schema, (&resultList.Items[i]).DeepCopy()))
 	}
 
 	return result, nil

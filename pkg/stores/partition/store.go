@@ -172,13 +172,18 @@ func (s *Store) List(apiOp *types.APIRequest, schema *types.APISchema) (types.AP
 
 	opts := listprocessor.ParseQuery(apiOp)
 
-	key, err := s.getCacheKey(apiOp, opts)
-	if err != nil {
-		return result, err
+	var key cacheKey
+	if s.listCache != nil {
+		key, err = s.getCacheKey(apiOp, opts)
+		if err != nil {
+			return result, err
+		}
 	}
 
 	var list []unstructured.Unstructured
-	if key.revision != "" && s.listCache != nil {
+
+	// cannot get from cache unless revision is provided
+	if s.listCache != nil && opts != nil && opts.Revision != "" {
 		cachedList, ok := s.listCache.Get(key)
 		if ok {
 			logrus.Tracef("found cached list for query %s?%s", apiOp.Request.URL.Path, apiOp.Request.URL.RawQuery)
@@ -199,7 +204,6 @@ func (s *Store) List(apiOp *types.APIRequest, schema *types.APISchema) (types.AP
 			return result, lister.Err()
 		}
 		list = listprocessor.SortList(list, opts.Sort)
-		key.revision = lister.Revision()
 		listToCache := &unstructured.UnstructuredList{
 			Items: list,
 		}
@@ -208,6 +212,7 @@ func (s *Store) List(apiOp *types.APIRequest, schema *types.APISchema) (types.AP
 			listToCache.SetContinue(c)
 		}
 		if s.listCache != nil {
+			key.revision = lister.Revision()
 			s.listCache.Add(key, listToCache, 30*time.Minute)
 		}
 		result.Continue = lister.Continue()

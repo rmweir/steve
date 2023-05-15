@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"k8s.io/apimachinery/pkg/util/cache"
 	"net/http"
 	"os"
 	"regexp"
@@ -36,7 +37,10 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-const watchTimeoutEnv = "CATTLE_WATCH_TIMEOUT_SECONDS"
+const (
+	watchTimeoutEnv = "CATTLE_WATCH_TIMEOUT_SECONDS"
+	revisionParam   = "revision"
+)
 
 var (
 	lowerChars  = regexp.MustCompile("[a-z]+")
@@ -65,6 +69,11 @@ type ClientGetter interface {
 // WarningBuffer holds warnings that may be returned from the kubernetes api
 type WarningBuffer []types.Warning
 
+type cacheKey struct {
+	resourcePath string
+	revision     string
+}
+
 // HandleWarningHeader takes the components of a kubernetes warning header and stores them
 func (w *WarningBuffer) HandleWarningHeader(code int, agent string, text string) {
 	*w = append(*w, types.Warning{
@@ -81,8 +90,9 @@ type RelationshipNotifier interface {
 
 // Store implements partition.UnstructuredStore directly on top of kubernetes.
 type Store struct {
-	clientGetter ClientGetter
-	notifier     RelationshipNotifier
+	clientGetter      ClientGetter
+	notifier          RelationshipNotifier
+	listRevisionCache *cache.LRUExpireCache
 }
 
 // NewProxyStore returns a wrapped types.Store.
@@ -92,8 +102,9 @@ func NewProxyStore(clientGetter ClientGetter, notifier RelationshipNotifier, loo
 			Store: partition.NewStore(
 				&rbacPartitioner{
 					proxyStore: &Store{
-						clientGetter: clientGetter,
-						notifier:     notifier,
+						clientGetter:      clientGetter,
+						notifier:          notifier,
+						listRevisionCache: cache.NewLRUExpireCache(100),
 					},
 				},
 				lookup,
@@ -246,6 +257,10 @@ func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dy
 		return nil, nil
 	}
 
+	if revision := parseRevision(apiOp); revision != "" {
+		key := getCacheKey(revision, apiOp.Request.URL.Path)
+		list, ok := s.listRevisionCache.Get(key)
+	}
 	k8sClient, _ := metricsStore.Wrap(client, nil)
 	resultList, err := k8sClient.List(apiOp, opts)
 	if err != nil {
@@ -255,6 +270,22 @@ func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dy
 	tableToList(resultList)
 
 	return resultList, nil
+}
+
+func parseRevision(apiOp *types.APIRequest) string {
+	if apiOp == nil {
+		return ""
+	}
+	q := apiOp.Request.URL.Query()
+	revision := q.Get(revisionParam)
+	return revision
+}
+
+func getCacheKey(resourcePath, revision string) cacheKey {
+	return cacheKey{
+		resourcePath: resourcePath,
+		revision:     revision,
+	}
 }
 
 func returnErr(err error, c chan watch.Event) {

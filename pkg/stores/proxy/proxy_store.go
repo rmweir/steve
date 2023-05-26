@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"k8s.io/apimachinery/pkg/util/cache"
 	"net/http"
 	"os"
 	"regexp"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/rancher/apiserver/pkg/types"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	apitypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/cache"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
@@ -43,9 +45,10 @@ const (
 )
 
 var (
-	lowerChars  = regexp.MustCompile("[a-z]+")
-	paramScheme = runtime.NewScheme()
-	paramCodec  = runtime.NewParameterCodec(paramScheme)
+	lowerChars       = regexp.MustCompile("[a-z]+")
+	paramScheme      = runtime.NewScheme()
+	paramCodec       = runtime.NewParameterCodec(paramScheme)
+	cacheNotFoundErr = errors.New("key was not found in cache")
 )
 
 func init() {
@@ -72,6 +75,17 @@ type WarningBuffer []types.Warning
 type cacheKey struct {
 	resourcePath string
 	revision     string
+	namespace    string
+	cont         string
+}
+
+type cacheObj struct {
+	size int
+	obj  interface{}
+}
+
+func (c cacheKey) String() string {
+	return fmt.Sprintf("resourcePath: %s, revision: %s, namespace: %s", c.resourcePath, c.revision, c.namespace)
 }
 
 // HandleWarningHeader takes the components of a kubernetes warning header and stores them
@@ -93,6 +107,9 @@ type Store struct {
 	clientGetter      ClientGetter
 	notifier          RelationshipNotifier
 	listRevisionCache *cache.LRUExpireCache
+	cacheLock         sync.Mutex
+	size              int
+	sizeLimit         int
 }
 
 // NewProxyStore returns a wrapped types.Store.
@@ -258,9 +275,17 @@ func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dy
 	}
 
 	if revision := parseRevision(apiOp); revision != "" {
-		key := getCacheKey(revision, apiOp.Request.URL.Path)
-		list, ok := s.listRevisionCache.Get(key)
+		list, err := s.getCache(getCacheKey(revision, apiOp.Request.URL.Path, apiOp.Namespace, opts.Continue))
+		if err != nil {
+			if !errors.Is(cacheNotFoundErr, err) {
+				return nil, err
+			}
+		}
+		if list != nil {
+			return list, nil
+		}
 	}
+
 	k8sClient, _ := metricsStore.Wrap(client, nil)
 	resultList, err := k8sClient.List(apiOp, opts)
 	if err != nil {
@@ -269,7 +294,83 @@ func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dy
 
 	tableToList(resultList)
 
+	if resourceVersion := resultList.GetResourceVersion(); resourceVersion != "" {
+		key := getCacheKey(resourceVersion, apiOp.Request.URL.Path, apiOp.Namespace, opts.Continue)
+		if err = s.AddCache(key, resultList); err != nil {
+			logrus.Errorf("[steve proxy store]: failed to cache obj for key [%s]: %v", key, err)
+		}
+	}
+
 	return resultList, nil
+}
+
+func (s *Store) getCache(key cacheKey) (*unstructured.UnstructuredList, error) {
+	// check if cache stored all namespaces
+	list, ok := s.listRevisionCache.Get(key)
+	if !ok {
+		return nil, cacheNotFoundErr
+	}
+	uList, ok := list.(*unstructured.UnstructuredList)
+	if !ok {
+		return nil, fmt.Errorf("could not assert object stored with key [%s] key as UnstructuredList", key)
+	}
+	return uList, nil
+}
+
+func (s *Store) AddCache(key cacheKey, obj interface{}) error {
+	s.cacheLock.Lock()
+	defer s.cacheLock.Unlock()
+
+	objBytes, err := json.Marshal(obj)
+	if err != nil {
+		return err
+	}
+
+	cacheListObj := cacheObj{
+		size: len(objBytes),
+		obj:  obj,
+	}
+
+	if err = s.incSize(cacheListObj.size); err != nil {
+		return err
+	}
+	s.listRevisionCache.Add(key, cacheListObj, 30*time.Minute)
+
+	return nil
+}
+
+func (s *Store) calculateSize() int {
+	var total int
+	for _, key := range s.listRevisionCache.Keys() {
+		obj, ok := s.listRevisionCache.Get(key)
+		if !ok {
+			continue
+		}
+
+		cacheObject, ok := obj.(cacheObj)
+		if !ok {
+			continue
+		}
+
+		total += cacheObject.size
+	}
+	return total
+}
+
+func (s *Store) incSize(inc int) error {
+	if !(s.size+inc > s.sizeLimit) {
+		s.sizeLimit += inc
+		return nil
+	}
+
+	s.sizeLimit = s.calculateSize()
+
+	if !(s.size+inc > s.sizeLimit) {
+		s.sizeLimit += inc
+		return nil
+	}
+
+	return fmt.Errorf("[steve proxy cache]: cache is near full with a size of [%d], cannot increment size by [%d]", s.sizeLimit, inc)
 }
 
 func parseRevision(apiOp *types.APIRequest) string {
@@ -281,10 +382,12 @@ func parseRevision(apiOp *types.APIRequest) string {
 	return revision
 }
 
-func getCacheKey(resourcePath, revision string) cacheKey {
+func getCacheKey(resourcePath, revision, ns, cont string) cacheKey {
 	return cacheKey{
 		resourcePath: resourcePath,
 		revision:     revision,
+		namespace:    ns,
+		cont:         cont,
 	}
 }
 

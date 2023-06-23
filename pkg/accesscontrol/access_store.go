@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/sirupsen/logrus"
 	"sort"
 	"time"
 
@@ -51,6 +52,7 @@ func (l *AccessStore) AccessFor(user user.Info) *AccessSet {
 			as, _ := val.(*AccessSet)
 			return as
 		}
+		logrus.Debugf("user [%s] uid [%s] not found in access cache with key [%s]", user.GetName(), user.GetUID(), cacheKey)
 	}
 
 	result := l.users.get(user.GetName())

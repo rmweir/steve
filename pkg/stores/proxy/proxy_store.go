@@ -114,6 +114,21 @@ type Store struct {
 
 // NewProxyStore returns a wrapped types.Store.
 func NewProxyStore(clientGetter ClientGetter, notifier RelationshipNotifier, lookup accesscontrol.AccessSetLookup, namespaceCache corecontrollers.NamespaceCache) types.Store {
+	providedSizeLimit := os.Getenv("CATTLE_STEVE_CACHE_LIMIT")
+	var sizeLimit int
+	var err error
+
+	if providedSizeLimit != "" {
+		sizeLimit, err = strconv.Atoi(providedSizeLimit)
+		if err != nil {
+			logrus.Debugf("cannot convert CATTLE_STEVE_CACHE_LIMIT value [%s] to int: %v", providedSizeLimit, err)
+		}
+	}
+
+	if sizeLimit == 0 {
+		sizeLimit = 10000000
+	}
+
 	return &errorStore{
 		Store: &WatchRefresh{
 			Store: partition.NewStore(
@@ -122,6 +137,7 @@ func NewProxyStore(clientGetter ClientGetter, notifier RelationshipNotifier, loo
 						clientGetter:      clientGetter,
 						notifier:          notifier,
 						listRevisionCache: cache.NewLRUExpireCache(100),
+						sizeLimit:         sizeLimit,
 					},
 				},
 				lookup,
@@ -275,7 +291,7 @@ func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dy
 	}
 
 	if revision := parseRevision(apiOp); revision != "" {
-		list, err := s.getCache(getCacheKey(revision, apiOp.Request.URL.Path, apiOp.Namespace, opts.Continue))
+		list, err := s.getCache(getCacheKey(apiOp.Request.URL.Path, revision, apiOp.Namespace, opts.Continue))
 		if err != nil {
 			if !errors.Is(cacheNotFoundErr, err) {
 				return nil, err
@@ -295,7 +311,7 @@ func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dy
 	tableToList(resultList)
 
 	if resourceVersion := resultList.GetResourceVersion(); resourceVersion != "" {
-		key := getCacheKey(resourceVersion, apiOp.Request.URL.Path, apiOp.Namespace, opts.Continue)
+		key := getCacheKey(apiOp.Request.URL.Path, resourceVersion, apiOp.Namespace, opts.Continue)
 		if err = s.AddCache(key, resultList); err != nil {
 			logrus.Errorf("[steve proxy store]: failed to cache obj for key [%s]: %v", key, err)
 		}
@@ -306,29 +322,29 @@ func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dy
 
 func (s *Store) getCache(key cacheKey) (*unstructured.UnstructuredList, error) {
 	// check if cache stored all namespaces
-	list, ok := s.listRevisionCache.Get(key)
+	obj, ok := s.listRevisionCache.Get(key)
 	if !ok {
 		return nil, cacheNotFoundErr
 	}
-	uList, ok := list.(*unstructured.UnstructuredList)
+	uList, ok := obj.(cacheObj)
 	if !ok {
 		return nil, fmt.Errorf("could not assert object stored with key [%s] key as UnstructuredList", key)
 	}
-	return uList, nil
+	return uList.obj.(*unstructured.UnstructuredList), nil
 }
 
-func (s *Store) AddCache(key cacheKey, obj interface{}) error {
+func (s *Store) AddCache(key cacheKey, list *unstructured.UnstructuredList) error {
 	s.cacheLock.Lock()
 	defer s.cacheLock.Unlock()
 
-	objBytes, err := json.Marshal(obj)
+	objBytes, err := list.MarshalJSON()
 	if err != nil {
 		return err
 	}
 
 	cacheListObj := cacheObj{
 		size: len(objBytes),
-		obj:  obj,
+		obj:  list,
 	}
 
 	if err = s.incSize(cacheListObj.size); err != nil {
@@ -359,11 +375,11 @@ func (s *Store) calculateSize() int {
 
 func (s *Store) incSize(inc int) error {
 	if !(s.size+inc > s.sizeLimit) {
-		s.sizeLimit += inc
+		s.size += inc
 		return nil
 	}
 
-	s.sizeLimit = s.calculateSize()
+	s.size = s.calculateSize()
 
 	if !(s.size+inc > s.sizeLimit) {
 		s.sizeLimit += inc

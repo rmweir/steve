@@ -11,6 +11,8 @@ import (
 	"reflect"
 	"regexp"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/rancher/apiserver/pkg/types"
@@ -28,18 +30,23 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	apitypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/cache"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
 
-const watchTimeoutEnv = "CATTLE_WATCH_TIMEOUT_SECONDS"
+const (
+	watchTimeoutEnv = "CATTLE_WATCH_TIMEOUT_SECONDS"
+	revisionParam   = "revision"
+)
 
 var (
-	lowerChars  = regexp.MustCompile("[a-z]+")
-	paramScheme = runtime.NewScheme()
-	paramCodec  = runtime.NewParameterCodec(paramScheme)
+	lowerChars       = regexp.MustCompile("[a-z]+")
+	paramScheme      = runtime.NewScheme()
+	paramCodec       = runtime.NewParameterCodec(paramScheme)
+	cacheNotFoundErr = errors.New("key was not found in cache")
 )
 
 func init() {
@@ -59,23 +66,59 @@ type ClientGetter interface {
 	TableAdminClientForWatch(ctx *types.APIRequest, schema *types.APISchema, namespace string) (dynamic.ResourceInterface, error)
 }
 
+type cacheKey struct {
+	resourcePath string
+	revision     string
+	namespace    string
+	cont         string
+}
+
+type cacheObj struct {
+	size int
+	obj  interface{}
+}
+
+func (c cacheKey) String() string {
+	return fmt.Sprintf("resourcePath: %s, revision: %s, namespace: %s", c.resourcePath, c.revision, c.namespace)
+}
+
 type RelationshipNotifier interface {
 	OnInboundRelationshipChange(ctx context.Context, schema *types.APISchema, namespace string) <-chan *summary.Relationship
 }
 
 type Store struct {
-	clientGetter ClientGetter
-	notifier     RelationshipNotifier
+	clientGetter      ClientGetter
+	notifier          RelationshipNotifier
+	listRevisionCache *cache.LRUExpireCache
+	cacheLock         sync.Mutex
+	size              int
+	sizeLimit         int
 }
 
 func NewProxyStore(clientGetter ClientGetter, notifier RelationshipNotifier, lookup accesscontrol.AccessSetLookup) types.Store {
+	providedSizeLimit := os.Getenv("CATTLE_STEVE_CACHE_LIMIT")
+	var sizeLimit int
+	var err error
+
+	if providedSizeLimit != "" {
+		sizeLimit, err = strconv.Atoi(providedSizeLimit)
+		if err != nil {
+			logrus.Debugf("cannot convert CATTLE_STEVE_CACHE_LIMIT value [%s] to int: %v", providedSizeLimit, err)
+		}
+	}
+
+	if sizeLimit == 0 {
+		sizeLimit = 10000000
+	}
 	return &errorStore{
 		Store: &WatchRefresh{
 			Store: &partition.Store{
 				Partitioner: &rbacPartitioner{
 					proxyStore: &Store{
-						clientGetter: clientGetter,
-						notifier:     notifier,
+						clientGetter:      clientGetter,
+						notifier:          notifier,
+						listRevisionCache: cache.NewLRUExpireCache(100),
+						sizeLimit:         sizeLimit,
 					},
 				},
 			},
@@ -261,6 +304,26 @@ func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dy
 		return types.APIObjectList{}, nil
 	}
 
+	if revision := parseRevision(apiOp); revision != "" {
+		list, err := s.getCache(getCacheKey(apiOp.Request.URL.Path, revision, apiOp.Namespace, opts.Continue))
+		if err != nil {
+			if !errors.Is(cacheNotFoundErr, err) {
+				return types.APIObjectList{}, err
+			}
+		}
+		result := types.APIObjectList{
+			Revision: list.GetResourceVersion(),
+			Continue: list.GetContinue(),
+		}
+		if list != nil {
+			tableToList(list)
+			for i := range list.Items {
+				result.Objects = append(result.Objects, toAPI(schema, (&list.Items[i]).DeepCopy()))
+			}
+			return result, nil
+		}
+	}
+
 	k8sClient, _ := metricsStore.Wrap(client, nil)
 	resultList, err := k8sClient.List(apiOp, opts)
 	if err != nil {
@@ -268,6 +331,13 @@ func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dy
 	}
 
 	tableToList(resultList)
+
+	if resourceVersion := resultList.GetResourceVersion(); resourceVersion != "" {
+		key := getCacheKey(apiOp.Request.URL.Path, resourceVersion, apiOp.Namespace, opts.Continue)
+		if err = s.AddCache(key, resultList); err != nil {
+			logrus.Errorf("[steve proxy store]: failed to cache obj for key [%s]: %v", key, err)
+		}
+	}
 
 	result := types.APIObjectList{
 		Revision: resultList.GetResourceVersion(),
@@ -279,6 +349,93 @@ func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dy
 	}
 
 	return result, nil
+}
+
+func (s *Store) getCache(key cacheKey) (*unstructured.UnstructuredList, error) {
+	// check if cache stored all namespaces
+	obj, ok := s.listRevisionCache.Get(key)
+	if !ok {
+		return nil, cacheNotFoundErr
+	}
+	uList, ok := obj.(cacheObj)
+	if !ok {
+		return nil, fmt.Errorf("could not assert object stored with key [%s] key as UnstructuredList", key)
+	}
+	return uList.obj.(*unstructured.UnstructuredList), nil
+}
+
+func (s *Store) AddCache(key cacheKey, list *unstructured.UnstructuredList) error {
+	s.cacheLock.Lock()
+	defer s.cacheLock.Unlock()
+
+	objBytes, err := list.MarshalJSON()
+	if err != nil {
+		return err
+	}
+
+	cacheListObj := cacheObj{
+		size: len(objBytes),
+		obj:  list,
+	}
+
+	if err = s.incSize(cacheListObj.size); err != nil {
+		return err
+	}
+	s.listRevisionCache.Add(key, cacheListObj, 30*time.Minute)
+
+	return nil
+}
+
+func (s *Store) calculateSize() int {
+	var total int
+	for _, key := range s.listRevisionCache.Keys() {
+		obj, ok := s.listRevisionCache.Get(key)
+		if !ok {
+			continue
+		}
+
+		cacheObject, ok := obj.(cacheObj)
+		if !ok {
+			continue
+		}
+
+		total += cacheObject.size
+	}
+	return total
+}
+
+func (s *Store) incSize(inc int) error {
+	if !(s.size+inc > s.sizeLimit) {
+		s.size += inc
+		return nil
+	}
+
+	s.size = s.calculateSize()
+
+	if !(s.size+inc > s.sizeLimit) {
+		s.sizeLimit += inc
+		return nil
+	}
+
+	return fmt.Errorf("[steve proxy cache]: cache is near full with a size of [%d], cannot increment size by [%d]", s.sizeLimit, inc)
+}
+
+func parseRevision(apiOp *types.APIRequest) string {
+	if apiOp == nil {
+		return ""
+	}
+	q := apiOp.Request.URL.Query()
+	revision := q.Get(revisionParam)
+	return revision
+}
+
+func getCacheKey(resourcePath, revision, ns, cont string) cacheKey {
+	return cacheKey{
+		resourcePath: resourcePath,
+		revision:     revision,
+		namespace:    ns,
+		cont:         cont,
+	}
 }
 
 func returnErr(err error, c chan types.APIEvent) {

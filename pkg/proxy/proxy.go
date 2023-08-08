@@ -87,7 +87,6 @@ func (r *RTWrapper) RoundTrip(req *http.Request) (*http.Response, error) {
 	res := &http.Response{}
 	var err error
 
-	defer clock.Stop()
 	start := time.Now()
 	res, err = r.rt.RoundTrip(req)
 	go func() {
@@ -96,9 +95,8 @@ func (r *RTWrapper) RoundTrip(req *http.Request) (*http.Response, error) {
 			select {
 			case <-clock.C:
 				logrus.Infof("[asdf] tick %v", req.RequestURI)
-			case <-req.Context().Done():
-				logrus.Infof("[asdf] is response closed? %v, %s ", res.Close, req.RequestURI)
-				logrus.Infof("[asdf] status: %s, %v", res.Status, req.RequestURI)
+				res.Body.Close()
+				defer clock.Stop()
 				break outter
 			}
 		}

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/proxy"
 	"k8s.io/apiserver/pkg/authentication/user"
@@ -83,25 +84,35 @@ type RTWrapper struct {
 
 func (r *RTWrapper) RoundTrip(req *http.Request) (*http.Response, error) {
 	logrus.Infof("[asdf] enter rt: %s", r)
-	clock := time.NewTimer(1 * time.Second)
 	res := &http.Response{}
 	var err error
+	if strings.Contains(req.URL.RequestURI(), "watch=true") {
+		ctx, _ := context.WithTimeout(req.Context(), 5*time.Second)
+		req = req.WithContext(ctx)
+	}
+	/*
+			clock := time.NewTimer(1 * time.Second)
+			start := time.Now()
+					if strings.Contains(req.URL.RequestURI(), "watch=true") {
+						ctx, _ := context.WithTimeout(req.Context(), 5*time.Second)
+						req = req.WithContext(ctx)
+				res, err = r.rt.RoundTrip(req)
+				go func() {
+				outter:
+					for {
+						select {
+						case <-clock.C:
+							logrus.Infof("[asdf] tick %v", req.RequestURI)
+							res.Body.Close()
+							defer clock.Stop()
+							break outter
+						}
+					}
+				}()
+		logrus.Infof("[asdf] req took: %s, %s", time.Now().Sub(start).String(), req.RequestURI)
 
-	start := time.Now()
+	*/
 	res, err = r.rt.RoundTrip(req)
-	go func() {
-	outter:
-		for {
-			select {
-			case <-clock.C:
-				logrus.Infof("[asdf] tick %v", req.RequestURI)
-				res.Body.Close()
-				defer clock.Stop()
-				break outter
-			}
-		}
-	}()
-	logrus.Infof("[asdf] req took: %s, %s", time.Now().Sub(start).String(), req.RequestURI)
 	return res, err
 
 }
@@ -124,6 +135,7 @@ func Handler(prefix string, cfg *rest.Config) (http.Handler, error) {
 	}
 
 	transport = &RTWrapper{rt: transport}
+	// just add timeout to upgradetransport
 	upgradeTransport, err := makeUpgradeTransport(cfg, transport)
 	if err != nil {
 		return nil, err

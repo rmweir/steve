@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/proxy"
@@ -74,6 +75,41 @@ func impersonate(rw http.ResponseWriter, req *http.Request, prefix string, cfg *
 		}
 	}
 	handler.ServeHTTP(rw, req)
+}
+
+// test a roundtrip wrapper
+type RTWrapper struct {
+	rt http.RoundTripper
+}
+
+func (r *RTWrapper) RoundTrip(req *http.Request) (*http.Response, error) {
+	logrus.Infof("[asdf] enter rt: %s", r)
+	clock := time.NewTimer(1 * time.Second)
+	res := &http.Response{}
+	var err error
+
+	defer clock.Stop()
+	start := time.Now()
+	logrus.Infof("Headers for: %s", req.RequestURI)
+	for k, v := range req.Header {
+		logrus.Infof(k, v)
+	}
+	res, err = r.rt.RoundTrip(req)
+	/*go func() {
+	outter:
+		for {
+			select {
+			case <-clock.C:
+				logrus.Infof("[asdf] tick %v", req.RequestURI)
+			case <-req.Context().Done():
+				logrus.Infof("[asdf] status: %s", req.RequestURI)
+				break outter
+			}
+		}
+	}()*/
+	logrus.Infof("[asdf] req took: %s, %s", time.Now().Sub(start).String(), req.RequestURI)
+	return res, err
+
 }
 
 // Mostly copied from "kubectl proxy" code

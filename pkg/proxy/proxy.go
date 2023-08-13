@@ -127,6 +127,7 @@ func Handler(prefix string, cfg *rest.Config) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	transport = &RTWrapper{rt: transport}
 	upgradeTransport, err := makeUpgradeTransport(cfg, transport)
 	if err != nil {
 		return nil, err

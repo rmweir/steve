@@ -1,17 +1,15 @@
 package proxy
 
 import (
-	"net/http"
-	"net/url"
-	"strings"
-	"time"
-
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/proxy"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/transport"
+	"net/http"
+	"net/url"
+	"strings"
 )
 
 func ImpersonatingHandler(prefix string, cfg *rest.Config) http.Handler {
@@ -83,33 +81,16 @@ type RTWrapper struct {
 }
 
 func (r *RTWrapper) RoundTrip(req *http.Request) (*http.Response, error) {
-	logrus.Infof("[asdf] enter rt: %s", r)
-	clock := time.NewTimer(1 * time.Second)
+	logrus.Infof("[asdf] enter rt: %s", req.RequestURI)
 	res := &http.Response{}
 	var err error
-
-	defer clock.Stop()
-	start := time.Now()
-	logrus.Infof("Headers for: %s", req.RequestURI)
-	for k, v := range req.Header {
-		logrus.Infof(k, v)
+	logrus.Infof("Close?: %v, %s", req.Close, req.RequestURI)
+	if strings.Contains(req.RequestURI, "watch=true") {
+		req.Close = true
+		logrus.Infof("Close set to true, %s", req.RequestURI)
 	}
 	res, err = r.rt.RoundTrip(req)
-	/*go func() {
-	outter:
-		for {
-			select {
-			case <-clock.C:
-				logrus.Infof("[asdf] tick %v", req.RequestURI)
-			case <-req.Context().Done():
-				logrus.Infof("[asdf] status: %s", req.RequestURI)
-				break outter
-			}
-		}
-	}()*/
-	logrus.Infof("[asdf] req took: %s, %s", time.Now().Sub(start).String(), req.RequestURI)
 	return res, err
-
 }
 
 // Mostly copied from "kubectl proxy" code

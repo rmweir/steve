@@ -84,12 +84,8 @@ func (r *RTWrapper) RoundTrip(req *http.Request) (*http.Response, error) {
 	logrus.Infof("[asdf] enter rt: %s", req.RequestURI)
 	res := &http.Response{}
 	var err error
-	logrus.Infof("Close?: %v, %s", req.Close, req.RequestURI)
-	if strings.Contains(req.RequestURI, "watch=true") {
-		req.Close = true
-		logrus.Infof("Close set to true, %s", req.RequestURI)
-	}
 	res, err = r.rt.RoundTrip(req)
+	logrus.Infof("[asdf] after rt: %v, %s", req.RequestURI)
 	return res, err
 }
 

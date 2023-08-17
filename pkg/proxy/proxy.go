@@ -1,15 +1,18 @@
 package proxy
 
 import (
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+
 	"github.com/sirupsen/logrus"
+	"golang.org/x/net/http/httpguts"
 	"k8s.io/apimachinery/pkg/util/proxy"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/transport"
-	"net/http"
-	"net/url"
-	"strings"
 )
 
 func ImpersonatingHandler(prefix string, cfg *rest.Config) http.Handler {
@@ -80,13 +83,43 @@ type RTWrapper struct {
 	rt http.RoundTripper
 }
 
+type EOFReader struct {
+	rd io.ReadCloser
+	n  int
+}
+
+func (e *EOFReader) Read(buff []byte) (int, error) {
+	logrus.Infof("%d", e.n)
+	if e.n == 1 {
+		logrus.Infof("read initial message, exiting")
+		return 0, io.EOF
+	}
+	n, err := e.rd.Read(buff)
+	if err != nil {
+		return n, err
+	}
+	e.n++
+	return n, err
+}
+
 func (r *RTWrapper) RoundTrip(req *http.Request) (*http.Response, error) {
 	logrus.Infof("[asdf] enter rt: %s", req.RequestURI)
 	res := &http.Response{}
 	var err error
 	res, err = r.rt.RoundTrip(req)
-	logrus.Infof("[asdf] after rt: %v, %s", req.RequestURI)
+	logrus.Infof("[asdf] after rt: %v, Status: %s", req.RequestURI, res.Status)
+	if strings.Contains(req.RequestURI, "watch=true") && !isUpgradeType(req) && res.Status == "200 OK" {
+		res.Body = io.NopCloser(&EOFReader{rd: res.Body})
+		logrus.Infof("closing, %s", req.RequestURI)
+	}
 	return res, err
+}
+
+func isUpgradeType(req *http.Request) bool {
+	if !httpguts.HeaderValuesContainsToken(req.Header["Connection"], "Upgrade") {
+		return false
+	}
+	return req.Header.Get("Upgrade") != ""
 }
 
 // Mostly copied from "kubectl proxy" code

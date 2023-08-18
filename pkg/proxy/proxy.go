@@ -96,8 +96,11 @@ func (e *EOFReader) Read(buff []byte) (int, error) {
 	}
 	n, err := e.rd.Read(buff)
 	if err != nil {
+		logrus.Infof("exiting with error: %v", err)
+		logrus.Infof(string(buff))
 		return n, err
 	}
+	logrus.Infof("Message:", string(buff))
 	e.n++
 	return n, err
 }
@@ -108,7 +111,7 @@ func (r *RTWrapper) RoundTrip(req *http.Request) (*http.Response, error) {
 	var err error
 	res, err = r.rt.RoundTrip(req)
 	logrus.Infof("[asdf] after rt: %v, Status: %s", req.RequestURI, res.Status)
-	if strings.Contains(req.RequestURI, "watch=true") && !isUpgradeType(req) && res.Status == "200 OK" {
+	if strings.Contains(req.RequestURI, "watch=true") {
 		res.Body = io.NopCloser(&EOFReader{rd: res.Body})
 		logrus.Infof("closing, %s", req.RequestURI)
 	}

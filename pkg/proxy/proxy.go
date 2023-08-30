@@ -76,6 +76,25 @@ func impersonate(rw http.ResponseWriter, req *http.Request, prefix string, cfg *
 	handler.ServeHTTP(rw, req)
 }
 
+// test a roundtrip wrapper
+type RTWrapper struct {
+	rt http.RoundTripper
+}
+
+func (r *RTWrapper) RoundTrip(req *http.Request) (*http.Response, error) {
+	logrus.Infof("[asdf] enter rt: %s", req.RequestURI)
+	logrus.Infof("[asdf] print headers, %s", req.RequestURI)
+	for k, v := range req.Header {
+		logrus.Infof("[asdf] req headers: key: %s, val: %s, %s", k, v, req.RequestURI)
+	}
+
+	res, err := r.rt.RoundTrip(req)
+	for k, v := range res.Header {
+		logrus.Infof("[asdf] res headers: key: %s, val: %s, %s", k, v, res.Request.RequestURI)
+	}
+	return res, err
+}
+
 // Mostly copied from "kubectl proxy" code
 func Handler(prefix string, cfg *rest.Config) (http.Handler, error) {
 	host := cfg.Host
@@ -91,6 +110,8 @@ func Handler(prefix string, cfg *rest.Config) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	transport = &RTWrapper{rt: transport}
 	upgradeTransport, err := makeUpgradeTransport(cfg, transport)
 	if err != nil {
 		return nil, err

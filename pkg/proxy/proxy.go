@@ -99,6 +99,7 @@ func Handler(prefix string, cfg *rest.Config) (http.Handler, error) {
 	proxy := proxy.NewUpgradeAwareHandler(target, transport, false, false, er)
 	proxy.UpgradeTransport = upgradeTransport
 	proxy.UseRequestLocation = true
+	proxy.UseLocationHost = true
 
 	handler := http.Handler(proxy)
 

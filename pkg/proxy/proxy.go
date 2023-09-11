@@ -91,6 +91,10 @@ func Handler(prefix string, cfg *rest.Config) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	transport, err = rest.HTTPWrappersForConfig(cfg, transport) // this may help with http2 to http1.1
+	if err != nil {
+		return nil, err
+	}
 	upgradeTransport, err := makeUpgradeTransport(cfg, transport)
 	if err != nil {
 		return nil, err

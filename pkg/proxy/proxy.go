@@ -87,6 +87,7 @@ func Handler(prefix string, cfg *rest.Config) (http.Handler, error) {
 		return nil, err
 	}
 
+	logrus.Infof("Nextprotos for proxy: %s", cfg.NextProtos)
 	transport, err := rest.TransportFor(cfg)
 	if err != nil {
 		return nil, err

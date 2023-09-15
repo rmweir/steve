@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"strings"
 
@@ -76,6 +77,26 @@ func impersonate(rw http.ResponseWriter, req *http.Request, prefix string, cfg *
 	handler.ServeHTTP(rw, req)
 }
 
+type logRT struct {
+	rt http.RoundTripper
+}
+
+func (l *logRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	reqOut, logErr := httputil.DumpRequestOut(req, true)
+	if logErr != nil {
+		logrus.Errorf("Failed to dump request log: %v", logErr)
+	}
+
+	res, err := l.rt.RoundTrip(req)
+	respOut, logErr := httputil.DumpResponse(res, false)
+	if err != nil {
+		logrus.Errorf("Failed to dump request log: %v", logErr)
+	}
+
+	logrus.Infof("Dumped req/resp for %s\nreq: %s\nresp: %s", req.RequestURI, reqOut, respOut)
+	return res, err
+}
+
 // Mostly copied from "kubectl proxy" code
 func Handler(prefix string, cfg *rest.Config) (http.Handler, error) {
 	host := cfg.Host
@@ -91,6 +112,8 @@ func Handler(prefix string, cfg *rest.Config) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	transport = &logRT{rt: transport}
 	upgradeTransport, err := makeUpgradeTransport(cfg, transport)
 	if err != nil {
 		return nil, err

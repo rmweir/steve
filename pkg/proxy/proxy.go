@@ -5,6 +5,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/proxy"
@@ -120,6 +121,7 @@ func Handler(prefix string, cfg *rest.Config) (http.Handler, error) {
 	}
 
 	proxy := proxy.NewUpgradeAwareHandler(target, transport, false, false, er)
+	proxy.FlushInterval = time.Second
 	proxy.UpgradeTransport = upgradeTransport
 	proxy.UseRequestLocation = true
 

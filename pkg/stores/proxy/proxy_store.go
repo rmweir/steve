@@ -122,7 +122,7 @@ func NewProxyStore(clientGetter ClientGetter, notifier RelationshipNotifier, loo
 					proxyStore: &Store{
 						clientGetter: clientGetter,
 						notifier:     notifier,
-						cacher:       cache.NewSizedRevisionCache(sizeLimit, elementLimit),
+						cacher:       cache.NewSizedRevisionCache(sizeLimit, elementLimit, clientGetter),
 					},
 				}, namespaceCache),
 				asl: lookup,
@@ -273,16 +273,14 @@ func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dy
 		return nil, nil
 	}
 
-	if opts.ResourceVersion != "" {
-		list, err := s.cacher.Get(cache.GetCacheKey(opts, apiOp.Request.URL.Path, apiOp.Namespace))
-		if err != nil {
-			if !errors.Is(cache.ErrNotFound, err) {
-				return nil, err
-			}
+	list, err := s.cacher.Get(cache.GetCacheKey(opts, apiOp.Request.URL.Path, apiOp.Namespace))
+	if err != nil {
+		if !errors.Is(cache.ErrNotFound, err) {
+			return nil, err
 		}
-		if list != nil {
-			return list, nil
-		}
+	}
+	if list != nil {
+		return list, nil
 	}
 
 	k8sClient, _ := metricsStore.Wrap(client, nil)
@@ -294,9 +292,17 @@ func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dy
 	tableToList(resultList)
 
 	if resourceVersion := resultList.GetResourceVersion(); resourceVersion != "" {
+		var latest *cache.Latest
+		if opts.ResourceVersion == "" {
+			latest = &cache.Latest{
+				APIOp:  apiOp,
+				Schema: schema,
+			}
+		}
 		opts.ResourceVersion = resourceVersion
 		key := cache.GetCacheKey(opts, apiOp.Request.URL.Path, apiOp.Namespace)
-		if err = s.cacher.Add(key, resultList); err != nil {
+
+		if err = s.cacher.Add(key, resultList, latest); err != nil {
 			logrus.Errorf("[steve proxy store]: failed to cache obj for key [%s]: %v", key, err)
 		}
 	}

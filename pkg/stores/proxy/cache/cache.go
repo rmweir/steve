@@ -9,9 +9,14 @@ import (
 	"unsafe"
 
 	"github.com/pkg/errors"
+	"github.com/rancher/apiserver/pkg/types"
+	"github.com/rancher/steve/pkg/stores/proxy/cache/cachekey"
+	"github.com/rancher/steve/pkg/stores/proxy/cache/rvmonitor"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/cache"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 )
 
 var (
@@ -25,43 +30,50 @@ type SizedRevisionCache struct {
 	cacheLock         sync.Mutex
 	size              int
 	sizeLimit         int
+	rvm               rvmonitor.LatestResourceVersionManager
 }
 
 // Cacher is a cache that stores and retrieves UnstructuredLists.
 type Cacher interface {
-	Get(key CacheKey) (*unstructured.UnstructuredList, error)
-	Add(key CacheKey, list *unstructured.UnstructuredList) error
+	Get(key cachekey.CacheKey) (*unstructured.UnstructuredList, error)
+	Add(key cachekey.CacheKey, list *unstructured.UnstructuredList, setLatest *Latest) error
 }
 
-type CacheKey struct {
-	listOptions  v1.ListOptions
-	resourcePath string
-	namespace    string
+type Latest struct {
+	APIOp  *types.APIRequest
+	Schema *types.APISchema
 }
 
 type cacheObj struct {
 	size int
 	obj  interface{}
 }
+type clientGetter interface {
+	DynamicClient(ctx *types.APIRequest, warningHandler rest.WarningHandler) (dynamic.Interface, error)
+}
 
 // NewSizedRevisionCache accepts a sizeLimit, in bytes, and a maxElements parameter to create a SizedRevisionCache.
-func NewSizedRevisionCache(sizeLimit, maxElements int) *SizedRevisionCache {
+func NewSizedRevisionCache(sizeLimit, maxElements int, clientGetter clientGetter) *SizedRevisionCache {
 	return &SizedRevisionCache{
 		listRevisionCache: cache.NewLRUExpireCache(maxElements),
 		sizeLimit:         sizeLimit,
+		rvm:               rvmonitor.NewResourceVersionMonitor(clientGetter),
 	}
 }
 
-// String returns a string contains the fields values of the cacheKey receiver.
-func (c CacheKey) String() string {
-	return fmt.Sprintf("listOptions: %v, resourcePath: %s, namespace: %s", c.listOptions.String(), c.resourcePath, c.namespace)
-}
-
 // Get returns the UnstructuredList stored under the given cacheKey if available. If not, as error is returned.
-func (s *SizedRevisionCache) Get(key CacheKey) (*unstructured.UnstructuredList, error) {
+func (s *SizedRevisionCache) Get(key cachekey.CacheKey) (*unstructured.UnstructuredList, error) {
 	s.cacheLock.Lock()
 	defer s.cacheLock.Unlock()
 	// check if cache stored all namespaces
+
+	if key.ListOptions.ResourceVersion == "" {
+		rv := s.rvm.GetLatestRV(key)
+		if rv == "" {
+			return nil, ErrNotFound
+		}
+		key.ListOptions.ResourceVersion = rv
+	}
 
 	obj, ok := s.listRevisionCache.Get(key)
 	if !ok {
@@ -75,7 +87,7 @@ func (s *SizedRevisionCache) Get(key CacheKey) (*unstructured.UnstructuredList, 
 }
 
 // Add attempts to add the given UnstructuredListed under the given key.
-func (s *SizedRevisionCache) Add(key CacheKey, list *unstructured.UnstructuredList) error {
+func (s *SizedRevisionCache) Add(key cachekey.CacheKey, list *unstructured.UnstructuredList, setLatest *Latest) error {
 	s.cacheLock.Lock()
 	defer s.cacheLock.Unlock()
 
@@ -90,6 +102,10 @@ func (s *SizedRevisionCache) Add(key CacheKey, list *unstructured.UnstructuredLi
 		return err
 	}
 	s.listRevisionCache.Add(key, cacheListObj, 30*time.Minute)
+
+	if setLatest != nil {
+		s.rvm.AddRVAndWatch(setLatest.APIOp, setLatest.Schema, key, len(list.Items))
+	}
 
 	return nil
 }
@@ -135,11 +151,11 @@ func (s *SizedRevisionCache) adjustSize(diff int) error {
 }
 
 // GetCacheKey returns a cacheKey with the given field values set.
-func GetCacheKey(options v1.ListOptions, resourcePath, ns string) CacheKey {
-	return CacheKey{
-		listOptions:  options,
-		resourcePath: resourcePath,
-		namespace:    ns,
+func GetCacheKey(options v1.ListOptions, resourcePath, ns string) cachekey.CacheKey {
+	return cachekey.CacheKey{
+		ListOptions:  options,
+		ResourcePath: resourcePath,
+		Namespace:    ns,
 	}
 }
 

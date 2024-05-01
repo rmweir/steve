@@ -6,7 +6,7 @@ replace (
 	github.com/crewjam/saml => github.com/rancher/saml v0.2.0
 	github.com/knative/pkg => github.com/rancher/pkg v0.0.0-20181214184433-b04c0947ad2f
 	github.com/matryer/moq => github.com/rancher/moq v0.0.0-20190404221404-ee5226d43009
-	github.com/rancher/lasso => /Users/rmweir/go/src/github.com/rancher/lasso
+	github.com/rancher/lasso => github.com/rmweir/lasso v0.0.0-20240501225020-839abc36b643
 	k8s.io/client-go => github.com/rancher/client-go v1.28.6-rancher1
 )
 
@@ -22,7 +22,7 @@ require (
 	github.com/rancher/apiserver v0.0.0-20240207153957-4fd7d821d952
 	github.com/rancher/dynamiclistener v0.5.0-rc2
 	github.com/rancher/kubernetes-provider-detector v0.1.5
-	github.com/rancher/lasso v0.0.0-20240123150939-7055397d6dfa
+	github.com/rancher/lasso v0.0.0-20240430201833-6f3def65ffc5
 	github.com/rancher/norman v0.0.0-20240207153100-3bb70b772b52
 	github.com/rancher/remotedialer v0.3.0
 	github.com/rancher/wrangler v1.1.2
